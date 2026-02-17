@@ -11,3 +11,18 @@ jobs:
     steps:
       # - run: echo "This PR was approved"
       - run: echo "${{ toJson(github) }}"
+
+  get_reviewers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump GitHub context for PR number
+        run: echo "PR number is ${{ github.event.pull_request.number }}"
+
+      - name: Fetch all reviewers (both requested and submitted)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Get all submitted reviews and requested reviewers in JSON format
+          # and process them as needed. This example uses `gh` CLI.
+          gh pr view "$PR_URL" --json reviews,requestedReviewers --jq '.reviews, .requestedReviewers'
