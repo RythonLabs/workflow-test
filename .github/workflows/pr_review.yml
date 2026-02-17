@@ -1,30 +1,68 @@
 name: PR review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted]
 
 jobs:
-  approved:
-    # if: github.event.review.state == 'approved'
+  re_request_team_review:
+    if: github.event.review.state == 'approved'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
     steps:
-      # - run: echo "This PR was approved"
-      - run: echo "${{ toJson(github) }}"
-
-  get_reviewers:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Dump GitHub context for PR number
-        run: echo "PR number is ${{ github.event.pull_request.number }}"
-
-      - name: Fetch all reviewers (both requested and submitted)
+      - name: Get PR details and requested teams
+        id: get_teams
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get all submitted reviews and requested reviewers in JSON format
-          # and process them as needed. This example uses `gh` CLI.
-          gh pr view "$PR_URL" --json reviews,reviewRequests --jq '.reviews, .reviewRequests'
+          # Get requested reviewer teams
+          TEAMS=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers \
+            --jq '.teams[].slug')
+
+          echo "Requested teams: $TEAMS"
+          echo "teams<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEAMS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check reviewer team membership and re-request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEWER: ${{ github.event.review.user.login }}
+        run: |
+          # Get the organization from the repository
+          ORG="${{ github.repository_owner }}"
+          REQUESTED_TEAMS="${{ steps.get_teams.outputs.teams }}"
+
+          # For each requested team, check if the reviewer is a member
+          for team_slug in $REQUESTED_TEAMS; do
+            echo "Checking if $REVIEWER is a member of team: $team_slug"
+
+            # Check if reviewer is in this team
+            if gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /orgs/$ORG/teams/$team_slug/memberships/$REVIEWER \
+              2>/dev/null | jq -e '.state == "active"' > /dev/null; then
+
+              echo "✓ $REVIEWER is a member of $team_slug - re-requesting review"
+
+              # Re-request review from this team
+              gh api \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers \
+                -f "team_reviewers[]=$team_slug"
+
+              echo "Re-requested review from team: $team_slug"
+            else
+              echo "✗ $REVIEWER is not a member of $team_slug"
+            fi
+          done
