@@ -1,13 +1,204 @@
-name: PR checks
+name: PR review
 
 on:
   pull_request_review:
     types: [submitted]
 
 jobs:
-  approved:
-    # if: github.event.review.state == 'approved'
+  re_request_team_review:
+    if: github.event.review.state == 'approved'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
     steps:
-      # - run: echo "This PR was approved"
-      - run: echo "${{ toJson(github) }}"
+      - name: Log review event details
+        run: |
+          echo "================================================"
+          echo "Review Event Triggered"
+          echo "================================================"
+          echo "Reviewer: ${{ github.event.review.user.login }}"
+          echo "Review State: ${{ github.event.review.state }}"
+          echo "PR Number: ${{ github.event.pull_request.number }}"
+          echo "PR Title: ${{ github.event.pull_request.title }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Organization: ${{ github.repository_owner }}"
+          echo "Review ID: ${{ github.event.review.id }}"
+          echo "Review Submitted At: ${{ github.event.review.submitted_at }}"
+          echo "================================================"
+
+      - name: Get PR details and requested teams
+        id: get_teams
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching requested reviewers for PR #${{ github.event.pull_request.number }}..."
+
+          # Get requested reviewer teams and store full response
+          RESPONSE=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers)
+
+          echo "Full API Response:"
+          echo "$RESPONSE" | jq '.'
+
+          # Extract team slugs
+          TEAMS=$(echo "$RESPONSE" | jq -r '.teams[].slug')
+
+          echo ""
+          echo "Extracted team slugs:"
+          if [ -z "$TEAMS" ]; then
+            echo "  (none - no teams are currently requested as reviewers)"
+          else
+            echo "$TEAMS" | while read team; do
+              echo "  - $team"
+            done
+          fi
+
+          echo "teams<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEAMS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check reviewer team membership and re-request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEWER: ${{ github.event.review.user.login }}
+        run: |
+          echo ""
+          echo "================================================"
+          echo "Checking Team Membership"
+          echo "================================================"
+
+          # Get the organization from the repository
+          ORG="${{ github.repository_owner }}"
+          REQUESTED_TEAMS="${{ steps.get_teams.outputs.teams }}"
+
+          echo "Organization: $ORG"
+          echo "Reviewer: $REVIEWER"
+          echo ""
+
+          # Check if there are any requested teams
+          if [ -z "$REQUESTED_TEAMS" ]; then
+            echo "No teams are currently requested as reviewers."
+            echo "This could mean:"
+            echo "  1. All team reviews have been dismissed or approved"
+            echo "  2. Only individual reviewers were requested"
+            echo "  3. The PR doesn't have any pending team review requests"
+            echo ""
+            echo "Workflow will exit without taking action."
+            exit 0
+          fi
+
+          # Counter for actions taken
+          TEAMS_RE_REQUESTED=0
+          TEAMS_NOT_MEMBER=0
+
+          # For each requested team, check if the reviewer is a member
+          for team_slug in $REQUESTED_TEAMS; do
+            echo "----------------------------------------"
+            echo "Checking team: $team_slug"
+            echo "API Call: GET /orgs/$ORG/teams/$team_slug/memberships/$REVIEWER"
+
+            # Check if reviewer is in this team and capture full response
+            MEMBERSHIP_RESPONSE=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /orgs/$ORG/teams/$team_slug/memberships/$REVIEWER 2>&1)
+
+            MEMBERSHIP_STATUS=$?
+
+            if [ $MEMBERSHIP_STATUS -eq 0 ]; then
+              echo "Membership API Response:"
+              echo "$MEMBERSHIP_RESPONSE" | jq '.'
+
+              # Check if membership is active
+              if echo "$MEMBERSHIP_RESPONSE" | jq -e '.state == "active"' > /dev/null; then
+                echo ""
+                echo "✓ $REVIEWER is an ACTIVE member of team: $team_slug"
+                echo "  → Re-requesting review from this team..."
+
+                # Re-request review from this team
+                RE_REQUEST_RESPONSE=$(gh api \
+                  -X POST \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers \
+                  -f "team_reviewers[]=$team_slug" 2>&1)
+
+                RE_REQUEST_STATUS=$?
+
+                if [ $RE_REQUEST_STATUS -eq 0 ]; then
+                  echo "  ✓ Successfully re-requested review from team: $team_slug"
+                  TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
+                else
+                  echo "  ✗ Failed to re-request review from team: $team_slug"
+                  echo "  Error: $RE_REQUEST_RESPONSE"
+                fi
+              else
+                echo ""
+                echo "○ $REVIEWER has membership but it's not active"
+                echo "  State: $(echo "$MEMBERSHIP_RESPONSE" | jq -r '.state')"
+                TEAMS_NOT_MEMBER=$((TEAMS_NOT_MEMBER + 1))
+              fi
+            else
+              echo ""
+              echo "✗ $REVIEWER is NOT a member of team: $team_slug"
+              echo "  (API returned non-zero status or 404)"
+              TEAMS_NOT_MEMBER=$((TEAMS_NOT_MEMBER + 1))
+            fi
+          done
+
+          echo ""
+          echo "================================================"
+          echo "Summary"
+          echo "================================================"
+          echo "Teams re-requested: $TEAMS_RE_REQUESTED"
+          echo "Teams where reviewer is not a member: $TEAMS_NOT_MEMBER"
+          echo "================================================"
+
+      - name: Verify final PR reviewer state
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo ""
+          echo "================================================"
+          echo "Final PR Reviewer State"
+          echo "================================================"
+          echo "Fetching current reviewer state for verification..."
+          echo ""
+
+          FINAL_RESPONSE=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers)
+
+          echo "Current Requested Reviewers:"
+          echo "$FINAL_RESPONSE" | jq '.'
+
+          echo ""
+          echo "Current Requested Teams:"
+          FINAL_TEAMS=$(echo "$FINAL_RESPONSE" | jq -r '.teams[].slug')
+          if [ -z "$FINAL_TEAMS" ]; then
+            echo "  (none)"
+          else
+            echo "$FINAL_TEAMS" | while read team; do
+              echo "  - $team"
+            done
+          fi
+
+          echo ""
+          echo "Current Requested Individual Reviewers:"
+          FINAL_USERS=$(echo "$FINAL_RESPONSE" | jq -r '.users[].login')
+          if [ -z "$FINAL_USERS" ]; then
+            echo "  (none)"
+          else
+            echo "$FINAL_USERS" | while read user; do
+              echo "  - $user"
+            done
+          fi
+          echo "================================================"
