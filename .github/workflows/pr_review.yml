@@ -27,4 +27,4 @@ jobs:
         run: |
           # Get all submitted reviews and requested reviewers in JSON format
           # and process them as needed. This example uses `gh` CLI.
-          gh pr view "$PR_URL" --json reviews,requestedReviewers --jq '.reviews, .reviewRequests'
+          gh pr view "$PR_URL" --json reviews,reviewRequests --jq '.reviews, .reviewRequests'
