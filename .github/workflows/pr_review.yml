@@ -18,12 +18,7 @@ jobs:
       - name: Get teams from CODEOWNERS
         id: get_teams
         run: |
-          ORG="${{ github.repository_owner }}"
-
-          CODEOWNERS_FILE=""
-          for f in CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS; do
-            [ -f "$f" ] && CODEOWNERS_FILE="$f" && break
-          done
+          CODEOWNERS_FILE=$(find . -maxdepth 3 -name CODEOWNERS | head -1)
 
           if [ -z "$CODEOWNERS_FILE" ]; then
             echo "No CODEOWNERS file found — nothing to re-request."
@@ -31,13 +26,9 @@ jobs:
             exit 0
           fi
 
-          echo "Reading teams from: $CODEOWNERS_FILE"
-
           TEAMS=$(grep -oE "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" \
-            | sed "s|@$ORG/||I" \
+            | awk -F/ '{print $2}' \
             | sort -u)
-
-          echo "Teams found: $(echo "$TEAMS" | tr '\n' ' ')"
 
           echo "teams<<EOF" >> "$GITHUB_OUTPUT"
           echo "$TEAMS" >> "$GITHUB_OUTPUT"
@@ -66,7 +57,7 @@ jobs:
 
           TEAMS_RE_REQUESTED=0
           MAX_ATTEMPTS=6
-          RETRY_DELAY=5  # seconds between attempts; 6 * 5 = 30s max wait per team
+          RETRY_DELAY=5  # seconds
 
           while IFS= read -r team_slug; do
             [ -z "$team_slug" ] && continue
@@ -76,18 +67,11 @@ jobs:
             for attempt in $(seq 1 $MAX_ATTEMPTS); do
               echo "  Attempt $attempt/$MAX_ATTEMPTS..."
 
-              gh api \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
-                -f "team_reviewers[]=$team_slug" > /dev/null
+              gh pr edit "$PR_NUMBER" --add-reviewer "${{ github.repository_owner }}/$team_slug" > /dev/null
 
               # Confirm the team is actually present — GitHub may remove it immediately
               # if review event processing hasn't settled yet.
               CURRENT_TEAMS=$(gh api \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
                 /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
                 --jq '[.teams[].slug] | join(",")')
 
