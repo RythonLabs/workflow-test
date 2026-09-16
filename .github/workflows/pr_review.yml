@@ -6,7 +6,7 @@ on:
 
 jobs:
   re_request_team_review:
-    if: github.event.review.state == 'approved'
+    if: github.event.review.state == 'approved' || github.event.review.state == 'changes_requested'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
