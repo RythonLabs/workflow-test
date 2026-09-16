@@ -82,8 +82,10 @@ jobs:
             exit 0
           fi
 
-          # ponytail: approval threshold check removed — requires read:org for team
-          # member lookup which GITHUB_TOKEN doesn't have. Add back when a PAT is available.
+          # Wait for GitHub to finish processing the review event before re-requesting.
+          # Without this, GitHub removes the team again immediately after we add it.
+          sleep 5
+
           TEAMS_RE_REQUESTED=0
 
           for team_slug in $TEAMS; do
