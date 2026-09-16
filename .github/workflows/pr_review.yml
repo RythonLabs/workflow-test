@@ -34,25 +34,15 @@ jobs:
 
       - name: Get PR details and requested teams
         id: get_teams
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Fetching requested reviewers for PR #${{ github.event.pull_request.number }}..."
+          # Read teams from the event payload — frozen at the moment the review was submitted.
+          # The live API endpoint /requested_reviewers is already empty by the time this runs
+          # because GitHub removes the team the instant a review is submitted.
+          TEAMS=$(echo '${{ toJson(github.event.pull_request.requested_teams) }}' | jq -r '.[].slug')
 
-          RESPONSE=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers)
-
-          echo "Full API Response:"
-          echo "$RESPONSE" | jq '.'
-
-          TEAMS=$(echo "$RESPONSE" | jq -r '.teams[].slug')
-
-          echo ""
-          echo "Extracted team slugs:"
+          echo "Requested teams from event payload:"
           if [ -z "$TEAMS" ]; then
-            echo "  (none - no teams are currently requested as reviewers)"
+            echo "  (none)"
           else
             echo "$TEAMS" | while read -r team; do echo "  - $team"; done
           fi
@@ -81,10 +71,7 @@ jobs:
           echo ""
 
           if [ -z "$REQUESTED_TEAMS" ]; then
-            echo "No teams are currently requested as reviewers."
-            echo "Possible reasons:"
-            echo "  1. All team reviews have been dismissed or approved"
-            echo "  2. Only individual reviewers were requested"
+            echo "No teams were requested as reviewers on this PR at review time."
             echo "Workflow will exit without taking action."
             exit 0
           fi
