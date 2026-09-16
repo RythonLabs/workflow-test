@@ -11,10 +11,6 @@ jobs:
     permissions:
       pull-requests: write
       contents: read
-    env:
-      # How many approvals from a team are required before we stop re-requesting.
-      # ponytail: hardcoded for now; move to a config file if teams need different thresholds.
-      REQUIRED_APPROVALS: 2
     steps:
       - name: Log review event details
         run: |
@@ -29,7 +25,6 @@ jobs:
           echo "Organization: ${{ github.repository_owner }}"
           echo "Review ID: ${{ github.event.review.id }}"
           echo "Review Submitted At: ${{ github.event.review.submitted_at }}"
-          echo "Required approvals threshold: $REQUIRED_APPROVALS"
           echo "================================================"
 
       - name: Checkout
@@ -38,9 +33,6 @@ jobs:
       - name: Get teams from CODEOWNERS
         id: get_teams
         run: |
-          # Parse CODEOWNERS for team entries (@org/slug) and extract bare slugs.
-          # We re-request all CODEOWNERS teams on every qualifying review — no membership
-          # check needed since GITHUB_TOKEN lacks read:org to call the membership API.
           ORG="${{ github.repository_owner }}"
 
           CODEOWNERS_FILE=""
@@ -71,132 +63,56 @@ jobs:
           echo "$TEAMS" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Check approval count and re-request if needed
+      - name: Re-request team reviews
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REVIEWER: ${{ github.event.review.user.login }}
         run: |
-          echo ""
-          echo "================================================"
-          echo "Checking Team Membership and Approval Counts"
-          echo "================================================"
-
-          ORG="${{ github.repository_owner }}"
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          REQUESTED_TEAMS="${{ steps.get_teams.outputs.teams }}"
+          TEAMS="${{ steps.get_teams.outputs.teams }}"
 
-          echo "Organization: $ORG"
-          echo "Reviewer: $REVIEWER"
-          echo "Required approvals: $REQUIRED_APPROVALS"
-          echo ""
-
-          if [ -z "$REQUESTED_TEAMS" ]; then
+          if [ -z "$TEAMS" ]; then
             echo "No CODEOWNERS teams found — nothing to re-request."
             exit 0
           fi
 
-          # Fetch all reviews on this PR once (reused for every team below)
-          ALL_REVIEWS=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/${{ github.repository }}/pulls/$PR_NUMBER/reviews)
-
-          echo "All reviews fetched. Total review records: $(echo "$ALL_REVIEWS" | jq 'length')"
-          echo ""
-
+          # ponytail: approval threshold check removed — requires read:org for team
+          # member lookup which GITHUB_TOKEN doesn't have. Add back when a PAT is available.
           TEAMS_RE_REQUESTED=0
-          TEAMS_THRESHOLD_MET=0
 
-          for team_slug in $REQUESTED_TEAMS; do
-            echo "----------------------------------------"
-            echo "Team: $team_slug"
+          for team_slug in $TEAMS; do
+            echo "Re-requesting review from team: $team_slug"
 
-            # Fetch all members of this team to count their approvals on this PR
-            TEAM_MEMBERS=$(gh api \
+            RESPONSE=$(gh api \
+              -X POST \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              /orgs/$ORG/teams/$team_slug/members \
-              | jq -r '.[].login')
+              /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
+              -f "team_reviewers[]=$team_slug" 2>&1)
+            STATUS=$?
 
-            echo "  Team members: $(echo "$TEAM_MEMBERS" | tr '\n' ' ')"
-
-            # Count distinct approvals from team members
-            # Use only the latest review per user (GitHub keeps history; last state wins)
-            APPROVAL_COUNT=$(echo "$ALL_REVIEWS" \
-              | jq --argjson members "$(echo "$TEAM_MEMBERS" | jq -R . | jq -s .)" \
-              '[
-                group_by(.user.login)[]
-                | last
-                | select(.state == "APPROVED" and (.user.login as $u | $members | index($u) != null))
-              ] | length')
-
-            echo "  Approvals from team members so far: $APPROVAL_COUNT / $REQUIRED_APPROVALS"
-
-            if [ "$APPROVAL_COUNT" -ge "$REQUIRED_APPROVALS" ]; then
-              echo "  ✓ Approval threshold met — no re-request needed"
-              TEAMS_THRESHOLD_MET=$((TEAMS_THRESHOLD_MET + 1))
+            if [ $STATUS -eq 0 ]; then
+              echo "  ✓ Successfully re-requested: $team_slug"
+              TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
             else
-              echo "  → Re-requesting review from team $team_slug ($APPROVAL_COUNT of $REQUIRED_APPROVALS approvals received)"
-
-              RE_REQUEST_RESPONSE=$(gh api \
-                -X POST \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
-                -f "team_reviewers[]=$team_slug" 2>&1)
-              RE_REQUEST_STATUS=$?
-
-              if [ $RE_REQUEST_STATUS -eq 0 ]; then
-                echo "  ✓ Successfully re-requested review from $team_slug"
-                TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
-              else
-                echo "  ✗ Failed to re-request review from $team_slug"
-                echo "  Error: $RE_REQUEST_RESPONSE"
-              fi
+              echo "  ✗ Failed to re-request: $team_slug"
+              echo "  Error: $RESPONSE"
             fi
           done
 
-          echo ""
-          echo "================================================"
-          echo "Summary"
-          echo "================================================"
-          echo "Teams re-requested:       $TEAMS_RE_REQUESTED"
-          echo "Teams threshold met:      $TEAMS_THRESHOLD_MET"
-          echo "================================================"
+          echo "Teams re-requested: $TEAMS_RE_REQUESTED"
 
       - name: Verify final PR reviewer state
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo ""
-          echo "================================================"
-          echo "Final PR Reviewer State"
-          echo "================================================"
-
           FINAL_RESPONSE=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers)
 
-          echo "Current Requested Reviewers:"
-          echo "$FINAL_RESPONSE" | jq '.'
-
-          echo ""
           echo "Requested Teams:"
-          FINAL_TEAMS=$(echo "$FINAL_RESPONSE" | jq -r '.teams[].slug')
-          if [ -z "$FINAL_TEAMS" ]; then
-            echo "  (none)"
-          else
-            echo "$FINAL_TEAMS" | while read -r team; do echo "  - $team"; done
-          fi
+          echo "$FINAL_RESPONSE" | jq -r '.teams[].slug // "(none)"'
 
-          echo ""
           echo "Requested Individual Reviewers:"
-          FINAL_USERS=$(echo "$FINAL_RESPONSE" | jq -r '.users[].login')
-          if [ -z "$FINAL_USERS" ]; then
-            echo "  (none)"
-          else
-            echo "$FINAL_USERS" | while read -r user; do echo "  - $user"; done
-          fi
-          echo "================================================"
+          echo "$FINAL_RESPONSE" | jq -r '.users[].login // "(none)"'
