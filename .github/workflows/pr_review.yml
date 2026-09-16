@@ -99,6 +99,9 @@ jobs:
               -f "team_reviewers[]=$team_slug" 2>&1) || true
             STATUS=$?
 
+            echo "  POST status: $STATUS"
+            echo "  POST response: $RESPONSE" | head -c 500
+
             if [ $STATUS -eq 0 ]; then
               echo "  ✓ Successfully re-requested: $team_slug"
               TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
