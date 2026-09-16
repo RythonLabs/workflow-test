@@ -1,13 +1,86 @@
-name: PR checks
+name: PR review
 
 on:
   pull_request_review:
     types: [submitted]
 
 jobs:
-  approved:
-    # if: github.event.review.state == 'approved'
+  re_request_team_review:
+    if: github.event.review.state == 'approved' || github.event.review.state == 'changes_requested'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
     steps:
-      # - run: echo "This PR was approved"
-      - run: echo "${{ toJson(github) }}"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get teams from CODEOWNERS
+        id: get_teams
+        run: |
+          CODEOWNERS_FILE=$(git ls-files CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS | head -1)
+
+          if [ -z "$CODEOWNERS_FILE" ]; then
+            echo "No CODEOWNERS file found — nothing to re-request."
+            echo "teams=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Match @org/team tokens; cut -f2 strips the org, leaving just the team slug.
+          TEAMS=$(grep -oP "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" | cut -d/ -f2 | sort -u)
+
+          echo "teams<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TEAMS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Re-request team reviews
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          TEAMS="${{ steps.get_teams.outputs.teams }}"
+
+          if [ -z "$TEAMS" ]; then
+            echo "No CODEOWNERS teams found — nothing to re-request."
+            exit 0
+          fi
+
+          MAX_ATTEMPTS=6
+          RETRY_DELAY=5  # seconds
+
+          while IFS= read -r team_slug; do
+            echo "Re-requesting review from team: $team_slug"
+
+            CONFIRMED=false
+            for attempt in $(seq 1 $MAX_ATTEMPTS); do
+              echo "  Attempt $attempt/$MAX_ATTEMPTS..."
+
+              gh pr edit "$PR_NUMBER" --add-reviewer "${{ github.repository_owner }}/$team_slug" > /dev/null
+
+              # Confirm the team is actually present — GitHub may remove it immediately
+              # if review event processing hasn't settled yet.
+              CURRENT_TEAMS=$(gh api \
+                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
+                --jq '[.teams[].slug] | join(",")')
+
+              if [[ "$CURRENT_TEAMS" == *"$team_slug"* ]]; then
+                echo "  ✓ Confirmed: $team_slug is in requested reviewers"
+                CONFIRMED=true
+                break
+              fi
+
+              echo "  Team not yet present (current: ${CURRENT_TEAMS:-none}), retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            done
+
+            if [ "$CONFIRMED" = false ]; then
+              echo "  ✗ Failed to confirm $team_slug after $MAX_ATTEMPTS attempts"
+            fi
+          done <<< "$TEAMS"
