@@ -13,12 +13,12 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@v4
 
       - name: Get teams from CODEOWNERS
         id: get_teams
         run: |
-          CODEOWNERS_FILE=$(find . -maxdepth 3 -name CODEOWNERS | head -1)
+          CODEOWNERS_FILE=$(git ls-files CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS | head -1)
 
           if [ -z "$CODEOWNERS_FILE" ]; then
             echo "No CODEOWNERS file found — nothing to re-request."
@@ -26,9 +26,7 @@ jobs:
             exit 0
           fi
 
-          TEAMS=$(grep -oE "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" \
-            | awk -F/ '{print $2}' \
-            | sort -u)
+          TEAMS=$(grep -oP "(?<=@[^/]+/)[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" | sort -u)
 
           echo "teams<<EOF" >> "$GITHUB_OUTPUT"
           echo "$TEAMS" >> "$GITHUB_OUTPUT"
@@ -36,12 +34,10 @@ jobs:
 
       - name: Generate GitHub App token
         id: app_token
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
 
       - name: Re-request team reviews
         env:
@@ -55,12 +51,10 @@ jobs:
             exit 0
           fi
 
-          TEAMS_RE_REQUESTED=0
           MAX_ATTEMPTS=6
           RETRY_DELAY=5  # seconds
 
           while IFS= read -r team_slug; do
-            [ -z "$team_slug" ] && continue
             echo "Re-requesting review from team: $team_slug"
 
             CONFIRMED=false
@@ -75,9 +69,8 @@ jobs:
                 /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
                 --jq '[.teams[].slug] | join(",")')
 
-              if echo "$CURRENT_TEAMS" | grep -qF "$team_slug"; then
+              if [[ "$CURRENT_TEAMS" == *"$team_slug"* ]]; then
                 echo "  ✓ Confirmed: $team_slug is in requested reviewers"
-                TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
                 CONFIRMED=true
                 break
               fi
@@ -90,5 +83,3 @@ jobs:
               echo "  ✗ Failed to confirm $team_slug after $MAX_ATTEMPTS attempts"
             fi
           done <<< "$TEAMS"
-
-          echo "Teams re-requested: $TEAMS_RE_REQUESTED"
