@@ -15,10 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get teams from CODEOWNERS
+      - name: Get teams from CODEOWNERS for changed files
         id: get_teams
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CODEOWNERS_FILE=$(git ls-files CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS | head -1)
+          ORG="${{ github.repository_owner }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          CODEOWNERS_FILE=""
+          for f in CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS; do
+            [ -f "$f" ] && CODEOWNERS_FILE="$f" && break
+          done
 
           if [ -z "$CODEOWNERS_FILE" ]; then
             echo "No CODEOWNERS file found — nothing to re-request."
@@ -26,8 +34,60 @@ jobs:
             exit 0
           fi
 
-          # Match @org/team tokens; cut -f2 strips the org, leaving just the team slug.
-          TEAMS=$(grep -oP "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" | cut -d/ -f2 | sort -u)
+          echo "Reading teams from: $CODEOWNERS_FILE"
+
+          CHANGED_FILES=$(gh pr view "$PR_NUMBER" --json files --jq '.files[].path')
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES" | while read -r f; do echo "  $f"; done
+
+          # For each changed file, find the last matching CODEOWNERS rule (GitHub spec:
+          # last match wins). Collect the union of teams across all matched rules.
+          MATCHED_TEAMS=""
+
+          while IFS= read -r filepath; do
+            [ -z "$filepath" ] && continue
+
+            # Walk every non-comment rule; track the last one that matches.
+            LAST_MATCH_OWNERS=""
+            while IFS= read -r line; do
+              # Skip comments and blank lines.
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              [[ -z "${line// }" ]] && continue
+
+              PATTERN=$(echo "$line" | awk '{print $1}')
+              OWNERS=$(echo "$line"  | awk '{$1=""; print $0}' | xargs)
+
+              # Convert CODEOWNERS glob to shell glob:
+              #   /foo  → anchored to repo root (foo)
+              #   foo   → matches anywhere (**/foo)
+              #   foo/  → directory prefix (foo/**)
+              if [[ "$PATTERN" == /* ]]; then
+                SHELL_PATTERN="${PATTERN#/}"          # strip leading /
+              else
+                SHELL_PATTERN="**/$PATTERN"
+              fi
+
+              # Use bash extglob-style match via 'case'.
+              if [[ "$filepath" == $SHELL_PATTERN ]] || \
+                 [[ "$filepath" == ${SHELL_PATTERN%/}/** ]]; then
+                LAST_MATCH_OWNERS="$OWNERS"
+              fi
+            done < "$CODEOWNERS_FILE"
+
+            if [ -n "$LAST_MATCH_OWNERS" ]; then
+              echo "  $filepath → $LAST_MATCH_OWNERS"
+              MATCHED_TEAMS="$MATCHED_TEAMS $LAST_MATCH_OWNERS"
+            fi
+          done <<< "$CHANGED_FILES"
+
+          # Extract only @org/team entries, strip org prefix, deduplicate.
+          TEAMS=$(echo "$MATCHED_TEAMS" \
+            | grep -oE "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" \
+            | sed "s|@$ORG/||I" \
+            | sort -u)
+
+          echo "Teams to re-request: $(echo "$TEAMS" | tr '\n' ' ')"
 
           echo "teams<<EOF" >> "$GITHUB_OUTPUT"
           echo "$TEAMS" >> "$GITHUB_OUTPUT"
@@ -66,9 +126,8 @@ jobs:
 
               # Confirm the team is actually present — GitHub may remove it immediately
               # if review event processing hasn't settled yet.
-              CURRENT_TEAMS=$(gh api \
-                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
-                --jq '[.teams[].slug] | join(",")')
+              CURRENT_TEAMS=$(gh pr view "$PR_NUMBER" --json reviewRequests \
+                --jq '[.reviewRequests[] | select(.type == "Team") | .slug] | join(",")')
 
               if [[ "$CURRENT_TEAMS" == *"$team_slug"* ]]; then
                 echo "  ✓ Confirmed: $team_slug is in requested reviewers"
