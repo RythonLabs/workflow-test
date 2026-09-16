@@ -26,7 +26,8 @@ jobs:
             exit 0
           fi
 
-          TEAMS=$(grep -oP "(?<=@[^/]+/)[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" | sort -u)
+          # Match @org/team tokens; cut -f2 strips the org, leaving just the team slug.
+          TEAMS=$(grep -oP "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" | cut -d/ -f2 | sort -u)
 
           echo "teams<<EOF" >> "$GITHUB_OUTPUT"
           echo "$TEAMS" >> "$GITHUB_OUTPUT"
