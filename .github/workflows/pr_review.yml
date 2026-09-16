@@ -11,6 +11,7 @@ jobs:
     permissions:
       pull-requests: write
       contents: read
+      members: read
     env:
       # How many approvals from a team are required before we stop re-requesting.
       # ponytail: hardcoded for now; move to a config file if teams need different thresholds.
