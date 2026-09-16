@@ -13,7 +13,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Get teams from CODEOWNERS
         id: get_teams
@@ -45,7 +45,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app_token
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -64,27 +64,46 @@ jobs:
             exit 0
           fi
 
-          # ponytail: fixed sleep — GitHub removes the team during review event processing
-          # and re-adding it too quickly causes an immediate re-removal. Replace with
-          # polling GET /pulls/{n}/requested_reviewers if this proves flaky.
-          sleep 5
-
           TEAMS_RE_REQUESTED=0
+          MAX_ATTEMPTS=6
+          RETRY_DELAY=5  # seconds between attempts; 6 * 5 = 30s max wait per team
 
           while IFS= read -r team_slug; do
             [ -z "$team_slug" ] && continue
             echo "Re-requesting review from team: $team_slug"
 
-            if gh api \
-              -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
-              -f "team_reviewers[]=$team_slug"; then
-              echo "  ✓ Successfully re-requested: $team_slug"
-              TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
-            else
-              echo "  ✗ Failed to re-request: $team_slug"
+            CONFIRMED=false
+            for attempt in $(seq 1 $MAX_ATTEMPTS); do
+              echo "  Attempt $attempt/$MAX_ATTEMPTS..."
+
+              gh api \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
+                -f "team_reviewers[]=$team_slug" > /dev/null
+
+              # Confirm the team is actually present — GitHub may remove it immediately
+              # if review event processing hasn't settled yet.
+              CURRENT_TEAMS=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                /repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers \
+                --jq '[.teams[].slug] | join(",")')
+
+              if echo "$CURRENT_TEAMS" | grep -qF "$team_slug"; then
+                echo "  ✓ Confirmed: $team_slug is in requested reviewers"
+                TEAMS_RE_REQUESTED=$((TEAMS_RE_REQUESTED + 1))
+                CONFIRMED=true
+                break
+              fi
+
+              echo "  Team not yet present (current: ${CURRENT_TEAMS:-none}), retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            done
+
+            if [ "$CONFIRMED" = false ]; then
+              echo "  ✗ Failed to confirm $team_slug after $MAX_ATTEMPTS attempts"
             fi
           done <<< "$TEAMS"
 
