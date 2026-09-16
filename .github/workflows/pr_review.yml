@@ -38,12 +38,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Use GraphQL to fetch the onBehalfOf teams for this exact review.
-          # The node ID is passed as a separate variable to avoid shell quoting issues
-          # with multiline -f query= arguments.
+          # The node ID is passed as a separate variable to avoid shell quoting issues.
+          # Pipe to jq explicitly rather than using --jq for consistent behaviour across gh versions.
           TEAMS=$(gh api graphql \
             -f nodeId='${{ github.event.review.node_id }}' \
             -f query='query($nodeId: ID!) { node(id: $nodeId) { ... on PullRequestReview { onBehalfOf(first: 10) { nodes { slug } } } } }' \
-            --jq '.data.node.onBehalfOf.nodes[].slug')
+            | jq -r '.data.node.onBehalfOf.nodes[].slug')
 
           echo "Teams this review was submitted on behalf of:"
           if [ -z "$TEAMS" ]; then
