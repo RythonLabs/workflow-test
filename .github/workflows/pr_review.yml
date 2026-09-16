@@ -37,13 +37,10 @@ jobs:
 
       - name: Get teams from CODEOWNERS
         id: get_teams
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Parse CODEOWNERS for team entries (@org/slug), extract just the slug.
-          # Then check if the reviewer is an active member of each team via REST
-          # (no read:org scope needed — GITHUB_TOKEN can check membership for its own org).
-          REVIEWER="${{ github.event.review.user.login }}"
+          # Parse CODEOWNERS for team entries (@org/slug) and extract bare slugs.
+          # We re-request all CODEOWNERS teams on every qualifying review — no membership
+          # check needed since GITHUB_TOKEN lacks read:org to call the membership API.
           ORG="${{ github.repository_owner }}"
 
           CODEOWNERS_FILE=""
@@ -59,35 +56,13 @@ jobs:
 
           echo "Reading teams from: $CODEOWNERS_FILE"
 
-          # Extract @org/slug entries, strip the @org/ prefix to get bare slugs
-          ALL_CODEOWNER_TEAMS=$(grep -oE '@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$CODEOWNERS_FILE" \
+          TEAMS=$(grep -oE "@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+" "$CODEOWNERS_FILE" \
             | sed "s|@$ORG/||I" \
             | sort -u)
 
-          echo "CODEOWNERS teams: $(echo "$ALL_CODEOWNER_TEAMS" | tr '\n' ' ')"
-          echo ""
-
-          # Keep only teams the reviewer is an active member of
-          TEAMS=""
-          for team_slug in $ALL_CODEOWNER_TEAMS; do
-            MEMBERSHIP=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              /orgs/$ORG/teams/$team_slug/memberships/$REVIEWER 2>/dev/null)
-            if echo "$MEMBERSHIP" | jq -e '.state == "active"' > /dev/null 2>&1; then
-              echo "  ✓ $REVIEWER is active member of: $team_slug"
-              TEAMS="$TEAMS $team_slug"
-            else
-              echo "  - $REVIEWER is not a member of: $team_slug"
-            fi
-          done
-
-          TEAMS=$(echo "$TEAMS" | tr ' ' '\n' | sed '/^$/d')
-
-          echo ""
-          echo "Teams to re-request:"
+          echo "Teams found:"
           if [ -z "$TEAMS" ]; then
-            echo "  (none — reviewer is not in any CODEOWNERS team)"
+            echo "  (none)"
           else
             echo "$TEAMS" | while read -r team; do echo "  - $team"; done
           fi
@@ -116,7 +91,7 @@ jobs:
           echo ""
 
           if [ -z "$REQUESTED_TEAMS" ]; then
-            echo "Reviewer is not a member of any CODEOWNERS team — nothing to re-request."
+            echo "No CODEOWNERS teams found — nothing to re-request."
             exit 0
           fi
 
