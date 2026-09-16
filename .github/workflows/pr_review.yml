@@ -34,13 +34,26 @@ jobs:
 
       - name: Get PR details and requested teams
         id: get_teams
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Read teams from the event payload — frozen at the moment the review was submitted.
-          # The live API endpoint /requested_reviewers is already empty by the time this runs
-          # because GitHub removes the team the instant a review is submitted.
-          TEAMS=$(echo '${{ toJson(github.event.pull_request.requested_teams) }}' | jq -r '.[].slug')
+          # Use GraphQL to fetch the onBehalfOf teams for this exact review.
+          # This is the only reliable source — the REST requested_reviewers endpoint
+          # is already empty by the time the workflow runs, and the event payload
+          # requested_teams is empty when the reviewer was added individually.
+          TEAMS=$(gh api graphql -f query='
+            {
+              node(id: "${{ github.event.review.node_id }}") {
+                ... on PullRequestReview {
+                  onBehalfOf(first: 10) {
+                    nodes { slug }
+                  }
+                }
+              }
+            }' \
+            --jq '.data.node.onBehalfOf.nodes[].slug')
 
-          echo "Requested teams from event payload:"
+          echo "Teams this review was submitted on behalf of:"
           if [ -z "$TEAMS" ]; then
             echo "  (none)"
           else
@@ -71,8 +84,7 @@ jobs:
           echo ""
 
           if [ -z "$REQUESTED_TEAMS" ]; then
-            echo "No teams were requested as reviewers on this PR at review time."
-            echo "Workflow will exit without taking action."
+            echo "This review was not submitted on behalf of any team — nothing to re-request."
             exit 0
           fi
 
@@ -87,32 +99,11 @@ jobs:
 
           TEAMS_RE_REQUESTED=0
           TEAMS_THRESHOLD_MET=0
-          TEAMS_NOT_MEMBER=0
 
           for team_slug in $REQUESTED_TEAMS; do
             echo "----------------------------------------"
             echo "Team: $team_slug"
-
-            # Check if the approver is a member of this team
-            MEMBERSHIP_RESPONSE=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              /orgs/$ORG/teams/$team_slug/memberships/$REVIEWER 2>&1)
-            MEMBERSHIP_STATUS=$?
-
-            if [ $MEMBERSHIP_STATUS -ne 0 ]; then
-              echo "  ✗ $REVIEWER is NOT a member of $team_slug — skipping"
-              TEAMS_NOT_MEMBER=$((TEAMS_NOT_MEMBER + 1))
-              continue
-            fi
-
-            if ! echo "$MEMBERSHIP_RESPONSE" | jq -e '.state == "active"' > /dev/null; then
-              echo "  ○ $REVIEWER membership in $team_slug is not active — skipping"
-              TEAMS_NOT_MEMBER=$((TEAMS_NOT_MEMBER + 1))
-              continue
-            fi
-
-            echo "  ✓ $REVIEWER is an active member of $team_slug"
+            # onBehalfOf already confirms reviewer is in this team — no membership check needed.
 
             # Fetch all members of this team to count their approvals on this PR
             TEAM_MEMBERS=$(gh api \
@@ -165,7 +156,6 @@ jobs:
           echo "================================================"
           echo "Teams re-requested:       $TEAMS_RE_REQUESTED"
           echo "Teams threshold met:      $TEAMS_THRESHOLD_MET"
-          echo "Teams reviewer not in:    $TEAMS_NOT_MEMBER"
           echo "================================================"
 
       - name: Verify final PR reviewer state
